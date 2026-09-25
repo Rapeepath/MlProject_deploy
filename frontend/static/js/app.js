@@ -1036,8 +1036,6 @@
       { key: "RMSE", label: "RMSE — ให้น้ำหนักกับความผิดพลาดใหญ่", unit: "", digits: 4, lower: true },
       { key: "R2", label: "R² — อธิบายความผันแปรได้เท่าไร", unit: "", digits: 4, lower: false },
       { key: "mean_accuracy_percent", label: "ความแม่นยำเฉลี่ย", unit: "%", digits: 2, lower: false },
-      { key: "median_accuracy_percent", label: "ความแม่นยำมัธยฐาน", unit: "%", digits: 2, lower: false },
-      { key: "max_error", label: "พลาดมากที่สุด", unit: " นาที", digits: 3, lower: true },
     ];
 
     $("#bench-rows").innerHTML = ROWS.map((row) => {
