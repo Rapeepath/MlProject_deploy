@@ -1,0 +1,25 @@
+# =====================================================================
+# Render.com Blueprint — วางไฟล์นี้ไว้ที่ backend/ แล้วชี้ Render มาที่ repo
+# (Render อ่าน render.yaml จาก root ของ repo ถ้าโปรเจกต์อยู่ใน subfolder
+#  ให้ย้ายไฟล์นี้ไป root แล้วแก้ dockerContext / rootDir ตามความเหมาะสม)
+# =====================================================================
+services:
+  - type: web
+    name: eta-prediction-api
+    runtime: docker
+    plan: free                  # free instance มี RAM 512 MB — ดูหมายเหตุใน README
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MODEL_PATH
+        value: /app/models/random_forest_eta.models
+      - key: LOG_LEVEL
+        value: INFO
+      # ระบุโดเมน Vercel ของหน้าบ้านหลัง deploy เสร็จ เพื่อปิด CORS ให้แคบลง
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: OMP_NUM_THREADS
+        value: "1"

@@ -1,0 +1,6 @@
+# Frontend: Django simulator UI (deploy บน Vercel)
+# ไม่มี dependency ที่ต้อง compile จึง build บน Vercel ได้เร็ว
+django==5.1.5
+requests==2.32.3
+whitenoise==6.8.2
+python-dotenv==1.0.1

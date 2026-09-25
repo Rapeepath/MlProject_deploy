@@ -1,0 +1,239 @@
+{% load static %}<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rider Live Map — จำลองการส่งอาหาร</title>
+<meta name="description" content="แผนที่จำลองติดตามไรเดอร์ส่งอาหารแบบเรียลไทม์ พร้อมเวลาคาดการณ์จากโมเดล Random Forest">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛵</text></svg>">
+<link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+<body>
+
+<!-- รายชื่อเมือง + กรอบพิกัดจริง ส่งให้ JavaScript ใช้วาดลวดลายแผนที่ -->
+{{ cities|json_script:"city-data" }}
+
+<!-- ================================================================= -->
+<!-- แถบบน                                                             -->
+<!-- ================================================================= -->
+<header class="topbar">
+  <div class="topbar__brand">
+    <span class="topbar__logo" aria-hidden="true">🛵</span>
+    <div>
+      <h1 class="topbar__title">Rider Live Map</h1>
+      <p class="topbar__subtitle">จำลองการส่งอาหาร · ทำนายเวลาด้วย Random Forest</p>
+    </div>
+  </div>
+
+  <div class="topbar__meta">
+    {% if backend_status.metrics %}
+    <span class="chip" title="ความคลาดเคลื่อนเฉลี่ยของโมเดลบนชุดทดสอบ 8,069 ออเดอร์">
+      <b>ความแม่นยำ</b>± {{ backend_status.metrics.MAE|floatformat:2 }} นาที
+    </span>
+    <span class="chip" title="สัดส่วนความผันแปรที่โมเดลอธิบายได้"><b>R²</b>{{ backend_status.metrics.R2|floatformat:3 }}</span>
+    {% endif %}
+    <button type="button" id="status-pill"
+            class="status-pill {% if backend_status.online %}is-online{% else %}is-offline{% endif %}"
+            title="คลิกเพื่อตรวจสอบการเชื่อมต่อใหม่">
+      <span class="status-pill__dot"></span>
+      <span id="status-text">{% if backend_status.online %}โมเดลพร้อม{% else %}โมเดลออฟไลน์{% endif %}</span>
+    </button>
+  </div>
+</header>
+
+{% if not backend_status.online %}
+<div class="banner banner--warn" role="alert">
+  <strong>เชื่อมต่อโมเดลไม่ได้</strong>
+  <span>{{ backend_status.detail }}</span>
+  <span class="banner__hint">กด "ลองใหม่" ที่จุดสถานะมุมขวาบนเมื่อ Backend กลับมาแล้ว</span>
+</div>
+{% endif %}
+
+<main class="stage">
+
+  <!-- =============================================================== -->
+  <!-- แผนที่                                                           -->
+  <!-- =============================================================== -->
+  <section class="mapwrap" aria-label="แผนที่จำลองการจัดส่ง">
+    <svg id="map" class="map" viewBox="0 0 1000 720" preserveAspectRatio="xMidYMid slice"
+         role="img" aria-labelledby="map-title">
+      <title id="map-title">แผนที่จำลองแสดงตำแหน่งร้านอาหาร จุดส่ง และไรเดอร์ที่กำลังเดินทาง</title>
+
+      <defs>
+        <!-- เส้นทางที่ยังไม่ได้วิ่ง -->
+        <linearGradient id="routeGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#ff8a3d"></stop>
+          <stop offset="100%" stop-color="#ffc93d"></stop>
+        </linearGradient>
+        <!-- แสงเรืองรอบไรเดอร์ -->
+        <radialGradient id="riderGlow">
+          <stop offset="0%" stop-color="#ff8a3d" stop-opacity="0.55"></stop>
+          <stop offset="100%" stop-color="#ff8a3d" stop-opacity="0"></stop>
+        </radialGradient>
+        <!-- ลายตารางถนนซอย -->
+        <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
+          <path d="M 50 0 L 0 0 0 50" fill="none" stroke="rgba(255,255,255,0.028)" stroke-width="1"></path>
+        </pattern>
+      </defs>
+
+      <!-- ชั้นที่ 1: พื้นเมือง (วาดด้วย JS ตามเมืองที่สุ่มได้) -->
+      <rect class="map__bg" x="0" y="0" width="1000" height="720"></rect>
+      <g id="layer-terrain"></g>
+      <rect x="0" y="0" width="1000" height="720" fill="url(#grid)"></rect>
+      <g id="layer-blocks"></g>
+      <g id="layer-roads"></g>
+
+      <!-- ชั้นที่ 2: เส้นทางและไรเดอร์ -->
+      <g id="layer-routes"></g>
+      <g id="layer-markers"></g>
+    </svg>
+
+    <!-- ป้ายชื่อเมืองมุมซ้ายบนของแผนที่ -->
+    <div class="mapbadge" id="map-city" hidden>
+      <span class="mapbadge__pin" aria-hidden="true">📍</span>
+      <span id="map-city-name">—</span>
+    </div>
+
+    <!-- การ์ด ETA ลอยเหมือนแอปส่งอาหารจริง -->
+    <div class="etacard" id="eta-card" hidden>
+      <div class="etacard__top">
+        <span class="etacard__avatar" id="eta-avatar" aria-hidden="true">🛵</span>
+        <div class="etacard__who">
+          <span class="etacard__name" id="eta-rider">—</span>
+          <span class="etacard__sub" id="eta-vehicle">—</span>
+        </div>
+        <span class="etacard__rating" id="eta-rating">—</span>
+      </div>
+
+      <div class="etacard__mid">
+        <div class="etacard__big">
+          <span id="eta-remaining">—</span><small>นาที</small>
+        </div>
+        <div class="etacard__label" id="eta-status">กำลังเดินทาง</div>
+      </div>
+
+      <div class="etabar"><div class="etabar__fill" id="eta-progress"></div></div>
+
+      <div class="etacard__foot">
+        <span>คาดการณ์ <b id="eta-total">—</b></span>
+        <span><b id="eta-distance">—</b></span>
+      </div>
+    </div>
+
+    <!-- สถานะว่าง -->
+    <div class="mapempty" id="map-empty">
+      <span class="mapempty__icon" aria-hidden="true">🗺️</span>
+      <h2>ยังไม่มีไรเดอร์บนแผนที่</h2>
+      <p>กดปุ่ม <b>สร้างไรเดอร์</b> ด้านล่าง เพื่อสุ่มออเดอร์ขึ้นมาแล้วดูการจัดส่งจำลอง</p>
+    </div>
+
+    <!-- แผงควบคุมลอยด้านล่างแผนที่ -->
+    <div class="controls">
+      <select id="city-select" class="select" title="เลือกเมือง" aria-label="เลือกเมืองที่จะสุ่ม">
+        <option value="">สุ่มทุกเมือง</option>
+        {% for c in cities %}
+        <option value="{{ c.code }}">{{ c.name }}</option>
+        {% endfor %}
+      </select>
+
+      <button type="button" id="btn-generate" class="btn btn--primary btn--big">
+        <span aria-hidden="true">🛵</span> สร้างไรเดอร์
+      </button>
+
+      <div class="speed" role="group" aria-label="ความเร็วการจำลอง">
+        <button type="button" class="speed__btn is-active" data-speed="1">1×</button>
+        <button type="button" class="speed__btn" data-speed="4">4×</button>
+        <button type="button" class="speed__btn" data-speed="10">10×</button>
+      </div>
+    </div>
+
+    <p id="map-error" class="maperror" role="alert" hidden></p>
+  </section>
+
+  <!-- =============================================================== -->
+  <!-- แถบข้างขวา: รายการไรเดอร์                                        -->
+  <!-- =============================================================== -->
+  <aside class="sidebar" aria-labelledby="riders-heading">
+    <div class="sidebar__head">
+      <h2 id="riders-heading" class="sidebar__title">
+        ไรเดอร์ที่กำลังส่ง <span class="sidebar__count" id="rider-count">0</span>
+      </h2>
+      <button type="button" id="btn-clear" class="btn btn--tiny" disabled>ล้างทั้งหมด</button>
+    </div>
+
+    <div class="sidebar__stats" id="fleet-stats" hidden>
+      <div class="stat"><span class="stat__label">กำลังส่ง</span><span class="stat__value" id="stat-active">0</span></div>
+      <div class="stat"><span class="stat__label">ส่งแล้ว</span><span class="stat__value" id="stat-done">0</span></div>
+      <div class="stat"><span class="stat__label">เฉลี่ย</span><span class="stat__value" id="stat-avg">—</span></div>
+    </div>
+
+    <div class="riderlist" id="rider-list"></div>
+
+    <p class="sidebar__empty" id="sidebar-empty">
+      ไรเดอร์ที่สร้างขึ้นจะมาอยู่ตรงนี้ · คลิกการ์ดเพื่อโฟกัสแผนที่ไปที่คนนั้น
+    </p>
+  </aside>
+</main>
+
+<!-- ================================================================= -->
+<!-- Modal: รายละเอียดข้อมูลที่สุ่มมา                                    -->
+<!-- ================================================================= -->
+<div class="modal" id="detail-modal" hidden>
+  <div class="modal__backdrop" data-close></div>
+
+  <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal__head">
+      <div>
+        <h2 class="modal__title" id="modal-title">รายละเอียดออเดอร์</h2>
+        <p class="modal__sub" id="modal-sub">—</p>
+      </div>
+      <button type="button" class="modal__close" data-close aria-label="ปิด">✕</button>
+    </header>
+
+    <div class="modal__body">
+      <!-- สรุปผลทำนาย -->
+      <section class="mblock mblock--hero">
+        <div class="mhero">
+          <div class="mhero__num"><span id="d-eta">—</span><small>นาที</small></div>
+          <div class="mhero__side">
+            <div class="mrow"><span>ช่วงที่คาด (± MAE)</span><b id="d-range">—</b></div>
+            <div class="mrow"><span>ความไม่แน่นอน (SD 200 ต้นไม้)</span><b id="d-std">—</b></div>
+          </div>
+        </div>
+      </section>
+
+      <div id="d-warnings" class="banner banner--info" hidden></div>
+
+      <!-- ข้อมูลดิบที่สุ่มขึ้นมา -->
+      <section class="mblock">
+        <h3 class="mblock__title">
+          ข้อมูลดิบที่สุ่มขึ้นมา
+          <small>19 ฟิลด์ รูปแบบเดียวกับ 1 แถวใน Zomato Dataset</small>
+        </h3>
+        <table class="dtable"><tbody id="d-raw"></tbody></table>
+      </section>
+
+      <!-- ฟีเจอร์ที่โมเดลคำนวณต่อ -->
+      <section class="mblock">
+        <h3 class="mblock__title">
+          ฟีเจอร์ที่โมเดลคำนวณต่อเอง
+          <small>ไม่ได้สุ่มมา แต่คำนวณจากข้อมูลดิบด้านบน</small>
+        </h3>
+        <table class="dtable"><tbody id="d-derived"></tbody></table>
+      </section>
+
+      <!-- ปัจจัยสำคัญ -->
+      <section class="mblock">
+        <h3 class="mblock__title">
+          ปัจจัยที่โมเดลให้น้ำหนักมากที่สุด
+          <small>ค่าความสำคัญโดยรวมของโมเดล ไม่ใช่ผลเฉพาะออเดอร์นี้</small>
+        </h3>
+        <ul class="factors" id="d-factors"></ul>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="{% static 'js/app.js' %}"></script>
+</body>
+</html>

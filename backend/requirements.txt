@@ -1,0 +1,11 @@
+# Backend: FastAPI ETA Prediction Service
+# หมายเหตุ: เวอร์ชัน scikit-learn ควรใกล้เคียงกับตอนเทรน (1.7.x) ไม่งั้น joblib
+# จะเตือน InconsistentVersionWarning และ unpickle อาจเพี้ยนได้
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+scikit-learn==1.7.1
+joblib==1.5.2
+pandas==2.2.3
+numpy==2.2.2
+python-dotenv==1.0.1

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "builds": [
+    {
+      "src": "delivery_sim/wsgi.py",
+      "use": "@vercel/python",
+      "config": { "maxLambdaSize": "15mb", "runtime": "python3.12" }
+    }
+  ],
+  "routes": [
+    { "src": "/static/(.*)", "dest": "/delivery_sim/wsgi.py" },
+    { "src": "/(.*)", "dest": "/delivery_sim/wsgi.py" }
+  ],
+  "env": {
+    "DJANGO_SETTINGS_MODULE": "delivery_sim.settings"
+  }
+}

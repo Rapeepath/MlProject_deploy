@@ -1,0 +1,2 @@
+# โมเดลมีขนาด ~129 MB เกินลิมิตไฟล์ปกติของ GitHub (100 MB) ต้องใช้ Git LFS
+models/*.models filter=lfs diff=lfs merge=lfs -text
