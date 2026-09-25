@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: eta-prediction-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MODEL_PATH
+        value: /app/models/random_forest_eta.models
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: OMP_NUM_THREADS
+        value: "1"
