@@ -1,10 +1,14 @@
 """
 View logic ของหน้าบ้าน Delivery ETA Simulator
 
-หน้าที่หลัก 3 อย่าง:
-  1. สุ่มออเดอร์จำลองตามการกระจายตัวจริงของ Zomato Dataset (ใช้ generator.py)
-  2. ยิง API ไปให้ Backend (FastAPI บน Render) ทำนายเวลาจัดส่ง
-  3. เสิร์ฟหน้า Dashboard พร้อมข้อมูลตั้งต้น
+หน้าที่หลัก:
+  1. ดึงออเดอร์จริงพร้อมเฉลยจากชุดทดสอบ text.csv (ผ่าน Backend)
+  2. ส่งให้ Backend ทำนายด้วย 2 โมเดล แล้วเทียบกับเฉลย
+  3. สั่งรัน benchmark ทั้ง 1,000 แถว
+  4. เสิร์ฟหน้าแผนที่ + แดชบอร์ดเปรียบเทียบ
+
+หมายเหตุ: การ "สุ่มออเดอร์ขึ้นมาเอง" (generator.py) ยังเก็บไว้ที่ /api/random/
+แต่หน้าเว็บไม่ได้ใช้แล้ว เพราะเปลี่ยนมาใช้ข้อมูลจริงที่มีเฉลยแทน
 
 ทุก endpoint ของหน้าบ้านทำตัวเป็น proxy บาง ๆ ไปหา Backend เพื่อไม่ให้เบราว์เซอร์
 ต้องยิงข้ามโดเมนเอง (ไม่ต้องเปิด CORS กว้าง และ URL ของ Backend ไม่หลุดไปฝั่ง client)
@@ -76,8 +80,17 @@ class BackendError(Exception):
         self.status_code = status_code
 
 
-def call_backend(path: str, method: str = "GET", payload: Any = None, params: Any = None) -> Any:
-    """เรียก Backend API พร้อมแปลง error ให้อ่านเข้าใจง่ายเป็นภาษาไทย"""
+def call_backend(
+    path: str,
+    method: str = "GET",
+    payload: Any = None,
+    params: Any = None,
+    timeout: float | None = None,
+) -> Any:
+    """เรียก Backend API พร้อมแปลง error ให้อ่านเข้าใจง่ายเป็นภาษาไทย
+
+    timeout: ใส่เมื่อ endpoint นั้นใช้เวลานานกว่าปกติ (เช่น benchmark 1,000 แถว)
+    """
     url = f"{settings.BACKEND_API_URL}{path}"
     try:
         response = requests.request(
@@ -85,7 +98,7 @@ def call_backend(path: str, method: str = "GET", payload: Any = None, params: An
             url,
             json=payload,
             params=params,
-            timeout=settings.BACKEND_TIMEOUT,
+            timeout=timeout or settings.BACKEND_TIMEOUT,
             headers={"Content-Type": "application/json"},
         )
     except requests.exceptions.ConnectTimeout as exc:
@@ -194,10 +207,19 @@ def index(request: HttpRequest) -> HttpResponse:
         if not settings.ALLOW_BACKEND_DOWN:
             raise
 
+    # จำนวนแถวในชุดทดสอบ ใช้แสดง "Test Sample #142 / 1000"
+    testset_info: Dict[str, Any] = {"count": None}
+    if backend_status["online"]:
+        try:
+            testset_info = call_backend("/testset/stats")
+        except BackendError as exc:
+            logger.warning("อ่านสถิติชุดทดสอบไม่สำเร็จ: %s", exc)
+
     context = {
         "backend_status": backend_status,
         # รายชื่อเมือง 22 แห่ง พร้อมกรอบพิกัดจริง — หน้าบ้านใช้วาดลวดลายแผนที่
         "cities": available_cities(),
+        "testset": testset_info,
     }
     return render(request, "simulator/index.html", context)
 
@@ -314,3 +336,96 @@ def api_health(request: HttpRequest) -> JsonResponse:
     except BackendError as exc:
         return JsonResponse({"online": False, "error": str(exc)}, status=exc.status_code)
     return JsonResponse({"online": health.get("model_loaded", False), "health": health})
+
+
+# =====================================================================
+# โหมดเปรียบเทียบ 2 โมเดล (ข้อมูลจริงพร้อมเฉลยจาก text.csv)
+# =====================================================================
+@require_GET
+def api_test_sample(request: HttpRequest) -> JsonResponse:
+    """ดึงออเดอร์จาก text.csv แล้วให้ Backend เปรียบเทียบ 2 โมเดลให้เลย
+
+    ใช้ /compare/test-sample ของ Backend ซึ่งทำทั้งดึงข้อมูลและทำนายในครั้งเดียว
+    จึงยิงแค่ request เดียวต่อการกดปุ่มหนึ่งครั้ง
+    """
+    params = {}
+    index = request.GET.get("index")
+    if index not in (None, ""):
+        try:
+            params["index"] = int(index)
+        except ValueError:
+            return JsonResponse({"error": "index ต้องเป็นจำนวนเต็ม"}, status=400)
+    seed = request.GET.get("seed")
+    if seed not in (None, ""):
+        try:
+            params["seed"] = int(seed)
+        except ValueError:
+            return JsonResponse({"error": "seed ต้องเป็นจำนวนเต็ม"}, status=400)
+
+    try:
+        result = call_backend("/compare/test-sample", params=params)
+    except BackendError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    return JsonResponse(result)
+
+
+@require_POST
+def api_compare(request: HttpRequest) -> JsonResponse:
+    """ส่งออเดอร์ที่ผู้ใช้กำหนดเองไปเปรียบเทียบ 2 โมเดล (เฉลยจะส่งมาหรือไม่ก็ได้)"""
+    try:
+        body = _parse_json_body(request)
+        order = clean_order_payload(body.get("order", body))
+        payload: Dict[str, Any] = {"order": order}
+        actual = body.get("actual_minutes")
+        if actual not in (None, ""):
+            payload["actual_minutes"] = float(actual)
+        result = call_backend("/compare", method="POST", payload=payload)
+    except BackendError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+    except (TypeError, ValueError) as exc:
+        return JsonResponse({"error": f"actual_minutes ต้องเป็นตัวเลข ({exc})"}, status=400)
+
+    return JsonResponse(result)
+
+
+@require_POST
+def api_evaluate_batch(request: HttpRequest) -> JsonResponse:
+    """สั่งรัน benchmark ทั้งชุด 1,000 แถวที่ฝั่ง Backend
+
+    งานนี้หนักกว่า request ปกติ (predict 1,000 แถว x 2 โมเดล) จึงขยาย timeout
+    ให้ยาวกว่าค่าปกติ ไม่งั้นจะตัดกลางคันทั้งที่ Backend ยังคำนวณอยู่
+    """
+    try:
+        body = _parse_json_body(request)
+    except BackendError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    payload: Dict[str, Any] = {}
+    limit = body.get("limit")
+    if limit not in (None, ""):
+        try:
+            payload["limit"] = int(limit)
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "limit ต้องเป็นจำนวนเต็ม"}, status=400)
+
+    try:
+        result = call_backend(
+            "/evaluate-batch",
+            method="POST",
+            payload=payload,
+            timeout=settings.BATCH_TIMEOUT,
+        )
+    except BackendError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)
+
+    return JsonResponse(result)
+
+
+@require_GET
+def api_testset_stats(request: HttpRequest) -> JsonResponse:
+    """ข้อมูลสรุปของชุดทดสอบ (ใช้แสดง 'x / 1000' บนหน้าเว็บ)"""
+    try:
+        return JsonResponse(call_backend("/testset/stats"))
+    except BackendError as exc:
+        return JsonResponse({"error": str(exc)}, status=exc.status_code)

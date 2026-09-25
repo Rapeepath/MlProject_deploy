@@ -1,18 +1,33 @@
+# =====================================================================
+# Render.com Blueprint (ไฟล์นี้อยู่ที่ root ของ repo — Render อ่านตัวนี้)
+#
+# ⚠ โมเดล 2 ตัวรวมกันใช้ RAM ~690 MB ซึ่งเกิน free instance (512 MB)
+#   วัดจริง: ไลบรารี 150 MB + tuned 236 MB + baseline 301 MB
+#   จึงต้องใช้ plan standard (2 GB) ขึ้นไป ดูหัวข้อ "เรื่องหน่วยความจำ" ใน README
+# =====================================================================
 services:
   - type: web
     name: eta-prediction-api
     runtime: docker
-    plan: free
+    plan: standard
     region: singapore
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      # โมเดล Tuned (200 ต้น, max_depth 15)
       - key: MODEL_PATH
         value: /app/models/random_forest_eta.models
+      # โมเดล Baseline (100 ต้น, ไม่จำกัดความลึก)
+      - key: BASELINE_MODEL_PATH
+        value: /app/models/baseline.model
+      # ชุดทดสอบพร้อมเฉลย 1,000 แถว
+      - key: TEST_CSV_PATH
+        value: /app/data/text.csv
       - key: LOG_LEVEL
         value: INFO
+      # ระบุโดเมน Vercel ของหน้าบ้านหลัง deploy เสร็จ เพื่อปิด CORS ให้แคบลง
       - key: ALLOWED_ORIGINS
         value: "*"
       - key: OMP_NUM_THREADS

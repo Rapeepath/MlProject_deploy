@@ -7,7 +7,9 @@ services:
   - type: web
     name: eta-prediction-api
     runtime: docker
-    plan: free                  # free instance มี RAM 512 MB — ดูหมายเหตุใน README
+    # ⚠ โมเดล 2 ตัวรวมกันใช้ RAM ~690 MB ซึ่ง "เกิน" free instance (512 MB)
+    # ต้องใช้ standard ขึ้นไป (2 GB) ดูหัวข้อ "เรื่องหน่วยความจำ" ใน README
+    plan: standard
     region: singapore
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
@@ -16,6 +18,10 @@ services:
     envVars:
       - key: MODEL_PATH
         value: /app/models/random_forest_eta.models
+      - key: BASELINE_MODEL_PATH
+        value: /app/models/baseline.model
+      - key: TEST_CSV_PATH
+        value: /app/data/text.csv
       - key: LOG_LEVEL
         value: INFO
       # ระบุโดเมน Vercel ของหน้าบ้านหลัง deploy เสร็จ เพื่อปิด CORS ให้แคบลง

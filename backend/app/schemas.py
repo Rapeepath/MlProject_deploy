@@ -122,13 +122,20 @@ class OrderRequest(BaseModel):
     @field_validator("Order_Date")
     @classmethod
     def _validate_date(cls, v: str) -> str:
+        """รับได้ทั้ง DD-MM-YYYY (dataset ต้นฉบับ) และ YYYY-MM-DD (text.csv)
+
+        ทำให้เป็นรูปแบบเดียว (DD-MM-YYYY) ก่อนส่งต่อ เพื่อให้ predictor.py
+        แปลงด้วย format='%d-%m-%Y' ได้เสมอ
+        """
         from datetime import datetime
 
-        try:
-            datetime.strptime(str(v).strip(), "%d-%m-%Y")
-        except ValueError as exc:
-            raise ValueError("ต้องอยู่ในรูปแบบ DD-MM-YYYY เช่น 12-02-2022") from exc
-        return str(v).strip()
+        text = str(v).strip()
+        for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt).strftime("%d-%m-%Y")
+            except ValueError:
+                continue
+        raise ValueError("ต้องอยู่ในรูปแบบ DD-MM-YYYY หรือ YYYY-MM-DD เช่น 12-02-2022")
 
     @field_validator(
         "Restaurant_latitude",
@@ -242,11 +249,150 @@ class HealthResponse(BaseModel):
     model_metrics: Optional[ModelMetrics] = None
     model_path: Optional[str] = None
 
+    # สถานะของโหมดเปรียบเทียบ 2 โมเดล
+    both_models_loaded: bool = Field(default=False, description="โหลดครบทั้ง 2 โมเดลหรือยัง")
+    models: List[dict] = Field(default_factory=list, description="รายละเอียดของแต่ละโมเดล")
+    testset_loaded: bool = Field(default=False, description="โหลด text.csv แล้วหรือยัง")
+    testset_rows: Optional[int] = Field(default=None, description="จำนวนแถวในชุดทดสอบ")
+
+    model_config = {"protected_namespaces": ()}
+
 
 class ErrorResponse(BaseModel):
     detail: str
 
 
+# =====================================================================
+# โหมดเปรียบเทียบ 2 โมเดล (Dual-Model Comparison)
+# =====================================================================
+class ModelSide(BaseModel):
+    """ผลของโมเดลฝั่งหนึ่งในการเปรียบเทียบ"""
+
+    model: str = Field(..., description="ชื่อโมเดลที่อ่านออก เช่น 'Random Forest (Tuned)'")
+    predicted_minutes: float = Field(..., description="เวลาที่โมเดลนี้ทำนาย (นาที)")
+    prediction_std: float = Field(..., description="SD ของคำทำนายจากต้นไม้ทุกต้น")
+    model_metrics: ModelMetrics = Field(..., description="metrics ตอนเทรนของโมเดลนี้")
+
+    # 3 ฟิลด์ล่างมีเฉพาะตอนที่ส่งเฉลยมาด้วย
+    error: Optional[float] = Field(None, description="|actual - predicted|")
+    diff: Optional[float] = Field(
+        None, description="predicted - actual (ติดลบ = ทำนายเร็วกว่าจริง)"
+    )
+    accuracy_percent: Optional[float] = Field(
+        None, description="max(0, 100 * (1 - |actual - predicted| / actual))"
+    )
+
+    # ปิด protected namespace 'model_' ของ pydantic ไม่งั้นจะเตือนเรื่องชื่อฟิลด์
+    model_config = {"protected_namespaces": ()}
+
+
+class ComparisonVerdict(BaseModel):
+    winner: str = Field(..., description="tuned / baseline / tie")
+    better_model: str = Field(..., description="ชื่อโมเดลที่ชนะ")
+    accuracy_gap: float = Field(..., description="ผลต่าง % ความแม่นยำของสองโมเดล")
+    error_gap: float = Field(..., description="ผลต่างค่าความคลาดเคลื่อนของสองโมเดล")
+
+
+class CompareRequest(BaseModel):
+    """ออเดอร์ 1 รายการ + เฉลย (ถ้ามี) สำหรับเปรียบเทียบสองโมเดล"""
+
+    order: OrderRequest
+    actual_minutes: Optional[float] = Field(
+        None,
+        ge=0,
+        description="เฉลยเวลาจริง ถ้าไม่ส่งมาจะทำนายอย่างเดียวโดยไม่คำนวณความแม่นยำ",
+    )
+
+
+class CompareResponse(BaseModel):
+    order_id: Optional[str] = None
+    test_index: Optional[int] = Field(
+        None, description="ลำดับแถวใน text.csv (มีเฉพาะตอนเรียกผ่าน /compare/test-sample)"
+    )
+    order: Optional[OrderRequest] = Field(
+        None, description="ข้อมูลดิบของออเดอร์ (ส่งกลับมาให้หน้าบ้านแสดงรายละเอียด)"
+    )
+    actual_minutes: Optional[float] = Field(None, description="เฉลยเวลาจริง (ถ้าส่งมา)")
+    tuned: ModelSide
+    baseline: ModelSide
+    comparison: Optional[ComparisonVerdict] = Field(
+        None, description="มีเฉพาะตอนที่มีเฉลยให้เทียบ"
+    )
+    derived_features: DerivedFeatures
+    warnings: List[str] = Field(default_factory=list)
+
+    model_config = {"protected_namespaces": ()}
+
+
+class TestSample(BaseModel):
+    """1 แถวจาก text.csv พร้อมเฉลย"""
+
+    index: int = Field(..., description="ลำดับแถวในไฟล์ เริ่มจาก 0")
+    order: OrderRequest
+    actual_minutes: float = Field(..., description="เฉลยเวลาจัดส่งจริง (นาที)")
+    precomputed: dict = Field(
+        default_factory=dict,
+        description="ฟีเจอร์ที่ไฟล์สกัดมาให้แล้ว ใช้ตรวจทานกับที่ server คำนวณเอง",
+    )
+
+
+class TestSamplesResponse(BaseModel):
+    total: int = Field(..., description="จำนวนแถวทั้งหมดในชุดทดสอบ")
+    count: int = Field(..., description="จำนวนแถวที่คืนมาครั้งนี้")
+    samples: List[TestSample]
+
+
+class ModelEvalStats(BaseModel):
+    MAE: float
+    RMSE: float
+    R2: float
+    mean_accuracy_percent: float
+    median_accuracy_percent: float
+    max_error: float
+    wins: int
+
+
+class WinRate(BaseModel):
+    tuned_wins: int
+    baseline_wins: int
+    ties: int
+    tuned_win_percent: float
+    baseline_win_percent: float
+    tie_percent: float
+
+
+class EvaluateBatchRequest(BaseModel):
+    """ถ้าไม่ส่ง orders มา จะประเมินทั้ง text.csv"""
+
+    orders: Optional[List[OrderRequest]] = Field(
+        None, description="ออเดอร์ที่ต้องการประเมิน (ต้องมีเฉลยใน actuals)"
+    )
+    actuals: Optional[List[float]] = Field(
+        None, description="เฉลยของแต่ละออเดอร์ ต้องยาวเท่ากับ orders"
+    )
+    limit: Optional[int] = Field(
+        None, ge=1, description="จำกัดจำนวนแถวจาก text.csv (ไว้ทดสอบเร็ว ๆ)"
+    )
+
+
+class EvaluateBatchResponse(BaseModel):
+    evaluated: int = Field(..., description="จำนวนแถวที่ประเมินได้จริง")
+    skipped: List[dict] = Field(default_factory=list, description="แถวที่ข้ามไปพร้อมเหตุผล")
+    tuned: ModelEvalStats
+    baseline: ModelEvalStats
+    win_rate: WinRate
+    overall_winner: str
+    mae_improvement_percent: float = Field(
+        ..., description="Tuned ลด MAE ลงกี่ % เทียบกับ Baseline"
+    )
+    accuracy_gap: float = Field(..., description="% ความแม่นยำเฉลี่ยของ Tuned ลบด้วยของ Baseline")
+    source: Optional[str] = Field(None, description="ที่มาของข้อมูลที่ประเมิน")
+    elapsed_seconds: Optional[float] = None
+
+    model_config = {"protected_namespaces": ()}
+
+
 # แก้ forward reference ของ nested models
 PredictionResponse.model_rebuild()
 BatchPredictionResponse.model_rebuild()
+CompareResponse.model_rebuild()

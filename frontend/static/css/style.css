@@ -24,6 +24,13 @@
   --danger: #f87171;
   --info: #60a5fa;
 
+  /* สีประจำแต่ละโมเดลในโหมดเปรียบเทียบ */
+  --tuned: #34d399;
+  --tuned-soft: rgba(52, 211, 153, 0.14);
+  --baseline: #60a5fa;
+  --baseline-soft: rgba(96, 165, 250, 0.14);
+  --truth: #ffc93d;
+
   --radius: 16px;
   --radius-sm: 10px;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
@@ -500,10 +507,18 @@ body {
 .stat__label { display: block; font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; }
 .stat__value { display: block; margin-top: 2px; font-size: 17px; font-weight: 800; font-family: var(--mono); color: var(--accent-2); }
 
-.riderlist { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+.sidebar__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
 
-.riderlist::-webkit-scrollbar { width: 8px; }
-.riderlist::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 999px; }
+.sidebar__scroll::-webkit-scrollbar { width: 8px; }
+.sidebar__scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 999px; }
 
 .sidebar__empty { margin: 0; padding: 0 20px 24px; font-size: 12.5px; color: var(--text-faint); text-align: center; }
 
@@ -716,24 +731,51 @@ body {
   body { overflow: auto; }
 
   .stage { grid-template-columns: 1fr; height: auto; }
-  .mapwrap { height: 62vh; min-height: 420px; }
   .sidebar { border-left: 0; border-top: 1px solid var(--border); }
-  .riderlist { overflow: visible; max-height: none; }
+  .sidebar__scroll { overflow: visible; max-height: none; }
+
+  /* จอแคบ: แผงควบคุมมี 4 ชิ้นจนห่อหลายบรรทัด ถ้ายังลอยทับแผนที่จะบังเนื้อหา
+     จึงย้ายลงมาอยู่ใต้แผนที่แบบปกติแทน */
+  .mapwrap { height: auto; min-height: 0; padding-bottom: 12px; }
+  .map { height: 56vh; min-height: 340px; }
+
+  .controls {
+    position: static;
+    transform: none;
+    margin: 12px auto 0;
+    width: fit-content;
+    max-width: calc(100% - 24px);
+    border-radius: var(--radius);
+  }
+
+  /* สถานะว่างต้องคลุมเฉพาะส่วนแผนที่ ไม่ใช่ทั้งกล่องที่รวมแผงควบคุมแล้ว */
+  .mapempty {
+    inset: 0 0 auto 0;
+    height: 56vh;
+    min-height: 340px;
+    padding: 24px;
+  }
+
+  .maperror { position: static; transform: none; margin: 10px auto 0; }
 
   .etacard { width: 210px; padding: 12px; }
   .etacard__big { font-size: 30px; }
   .etacard__foot { display: none; }
 
-  .controls { border-radius: var(--radius); bottom: 14px; }
   .topbar__subtitle { display: none; }
   .chip { display: none; }
 }
 
 @media (max-width: 560px) {
-  .etacard { position: static; width: auto; margin: 0; border-radius: 0; border-width: 1px 0 0; animation: none; }
-  .mapwrap { height: auto; }
-  .map { height: 52vh; min-height: 340px; }
-  .mapempty { position: static; padding: 40px 20px; }
+  .etacard {
+    position: static;
+    width: auto;
+    margin: 10px 0 0;
+    border-radius: var(--radius-sm);
+    animation: none;
+  }
+  .map { height: 48vh; min-height: 300px; }
+  .mapempty { position: static; height: auto; min-height: 0; padding: 40px 20px; }
 }
 
 /* ===================================================================
@@ -745,4 +787,320 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* ===================================================================
+   โหมดเปรียบเทียบ 2 โมเดล
+   =================================================================== */
+
+/* ---------- ช่องกรอกเลขแถว ---------- */
+.idxfield {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(8, 12, 24, 0.7);
+  border: 1px solid var(--border-strong);
+}
+
+.idxfield__hash { color: var(--text-faint); font-family: var(--mono); font-size: 13px; }
+
+.idxfield__input {
+  width: 62px;
+  padding: 9px 2px;
+  font: inherit;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text);
+  background: transparent;
+  border: 0;
+}
+
+.idxfield__input:focus { outline: none; }
+.idxfield:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.btn--accent {
+  background: rgba(96, 165, 250, 0.16);
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #bfdbfe;
+}
+
+.btn--accent:hover:not(:disabled) { background: rgba(96, 165, 250, 0.26); }
+.btn--accent b { font-family: var(--mono); font-weight: 700; }
+
+.btn--wide { width: 100%; }
+
+/* ---------- การ์ดเฉลยจริง ---------- */
+.truth {
+  display: grid;
+  gap: 2px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 201, 61, 0.36);
+  background: linear-gradient(135deg, rgba(255, 201, 61, 0.14), rgba(255, 138, 61, 0.05));
+  text-align: center;
+}
+
+.truth__label { font-size: 11.5px; color: #fde68a; font-weight: 600; letter-spacing: 0.02em; }
+.truth__value { font-size: 15px; color: var(--text-dim); }
+.truth__value b {
+  font-size: 34px;
+  font-weight: 800;
+  font-family: var(--mono);
+  color: var(--truth);
+  letter-spacing: -0.02em;
+}
+.truth__src { font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); }
+
+/* ---------- การ์ดโมเดล 2 ฝั่ง ---------- */
+.versus { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.mcard {
+  position: relative;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  text-align: center;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.mcard--tuned.is-winner {
+  border-color: var(--tuned);
+  background: var(--tuned-soft);
+  transform: translateY(-2px);
+}
+
+.mcard--baseline.is-winner {
+  border-color: var(--baseline);
+  background: var(--baseline-soft);
+  transform: translateY(-2px);
+}
+
+.mcard__head { display: flex; align-items: center; justify-content: center; gap: 5px; }
+.mcard__dot { font-size: 9px; }
+.mcard__name { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }
+.mcard__crown { font-size: 13px; }
+
+.mcard__pred { margin-top: 8px; line-height: 1; }
+.mcard__pred b {
+  font-size: 26px;
+  font-weight: 800;
+  font-family: var(--mono);
+  letter-spacing: -0.02em;
+}
+.mcard__pred small { font-size: 10.5px; color: var(--text-dim); margin-left: 3px; }
+
+.mcard--tuned .mcard__pred b { color: var(--tuned); }
+.mcard--baseline .mcard__pred b { color: var(--baseline); }
+
+.mcard__diff {
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+
+.mcard__diff.is-over { color: #fca5a5; }
+.mcard__diff.is-under { color: #93c5fd; }
+.mcard__diff.is-exact { color: var(--ok); }
+
+.mcard__acclabel { margin-top: 9px; font-size: 10.5px; color: var(--text-faint); }
+.mcard__acclabel b { font-size: 14px; font-family: var(--mono); color: var(--text); font-weight: 800; }
+
+.accbar {
+  height: 6px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.accbar__fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.accbar__fill--tuned { background: linear-gradient(90deg, var(--tuned), #6ee7b7); }
+.accbar__fill--baseline { background: linear-gradient(90deg, var(--baseline), #93c5fd); }
+
+.mcard__foot {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  font-size: 9.5px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+/* ---------- แถบผู้ชนะ ---------- */
+.winner {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.winner__icon { font-size: 18px; flex-shrink: 0; }
+.winner__text b { font-family: var(--mono); }
+
+.winner.is-tuned { border-color: rgba(52, 211, 153, 0.4); background: var(--tuned-soft); }
+.winner.is-baseline { border-color: rgba(96, 165, 250, 0.4); background: var(--baseline-soft); }
+.winner.is-tie { border-color: var(--border-strong); background: var(--surface-2); }
+
+.winner--big { padding: 16px 18px; font-size: 14px; }
+.winner--big .winner__icon { font-size: 26px; }
+
+/* ---------- ประวัติ ---------- */
+.history { border-top: 1px solid var(--border); padding-top: 12px; }
+
+.history__title {
+  margin: 0 0 9px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.history__title b { font-family: var(--mono); color: var(--text); }
+
+.history__title small {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--mono);
+  color: var(--text-faint);
+}
+
+.history__list { display: flex; flex-direction: column; gap: 5px; }
+
+.hrow {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.hrow:hover { background: rgba(255, 255, 255, 0.06); }
+.hrow__idx { font-family: var(--mono); color: var(--text-faint); }
+.hrow__bar { display: flex; gap: 3px; align-items: center; justify-content: center; }
+.hrow__chip {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.hrow__chip--tuned { background: var(--tuned-soft); color: var(--tuned); }
+.hrow__chip--baseline { background: var(--baseline-soft); color: var(--baseline); }
+.hrow__chip--truth { background: rgba(255, 201, 61, 0.14); color: var(--truth); }
+.hrow__win { font-size: 12px; }
+
+/* #bench-body ครอบ section ไว้อีกชั้น gap ของ .modal__body จึงไม่ถึงลูกข้างใน
+   ต้องกำหนดระยะห่างเองที่นี่ */
+#bench-body { display: flex; flex-direction: column; gap: 20px; }
+
+/* ---------- ตารางผล benchmark ---------- */
+.btable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+
+.btable thead th {
+  padding: 8px 10px;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.btable thead th:first-child { text-align: left; }
+.btable thead th.is-tuned { color: var(--tuned); }
+.btable thead th.is-baseline { color: var(--baseline); }
+
+.btable tbody tr { border-bottom: 1px solid rgba(255, 255, 255, 0.055); }
+.btable tbody tr:last-child { border-bottom: 0; }
+
+.btable td {
+  padding: 8px 10px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.btable td:first-child {
+  text-align: left;
+  font-family: var(--font);
+  color: var(--text-dim);
+  white-space: normal;
+}
+
+.btable td small { display: block; font-size: 10px; color: var(--text-faint); font-family: var(--font); }
+.btable td.is-best { color: var(--ok); font-weight: 800; }
+.btable td.is-verdict { font-family: var(--font); font-size: 11.5px; }
+
+/* ---------- แถบสัดส่วนการชนะ ---------- */
+.winbar {
+  display: flex;
+  height: 26px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.winbar__seg {
+  display: grid;
+  place-items: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: #06121f;
+  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.winbar__seg--tuned { background: linear-gradient(90deg, var(--tuned), #6ee7b7); }
+.winbar__seg--baseline { background: linear-gradient(90deg, #93c5fd, var(--baseline)); }
+.winbar__seg--tie { background: rgba(255, 255, 255, 0.22); color: var(--text); }
+
+.winlegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.winlegend b { color: var(--text); font-family: var(--mono); margin-left: 3px; }
+
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+.dot--tuned { background: var(--tuned); }
+.dot--baseline { background: var(--baseline); }
+.dot--tie { background: rgba(255, 255, 255, 0.35); }
+
+/* ---------- responsive ---------- */
+@media (max-width: 420px) {
+  .versus { grid-template-columns: 1fr; }
 }

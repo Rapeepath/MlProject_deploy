@@ -1,5 +1,13 @@
 """
-โหลดโมเดล random_forest_eta.models และทำ Preprocessing + Predict
+โหลดโมเดล 2 ตัวและทำ Preprocessing + Predict + เปรียบเทียบกับเฉลย
+
+โมเดลทั้งสองตัวมาจาก notebook เดียวกันและใช้ "สัญญาฟีเจอร์ 33 คอลัมน์" ชุดเดียวกันเป๊ะ
+(ตรวจสอบตอนโหลดด้วย DualPredictor.load()) ต่างกันแค่ hyperparameters:
+
+  * model_tuned    : random_forest_eta.models — 200 ต้น, max_depth=15 (ผ่าน RandomizedSearchCV)
+  * model_baseline : baseline.model           — 100 ต้น, max_depth=None (ค่าเริ่มต้น)
+
+เพราะสัญญาฟีเจอร์เหมือนกัน เราจึง build_features() แค่ครั้งเดียวแล้วป้อนให้ทั้งสองโมเดล
 
 ไฟล์นี้คือ "สัญญา" ระหว่าง notebook กับ API: ลำดับขั้นตอนทุกอย่างในนี้ต้องตรงกับ
 Untitled42.ipynb เป๊ะ ๆ ไม่งั้นโมเดลจะเห็นฟีเจอร์ผิดรูปและทำนายเพี้ยน
@@ -152,19 +160,42 @@ def compute_prep_time(time_ordered: str, time_picked: str) -> float:
 # =====================================================================
 # ตัวโหลดโมเดล (singleton + thread-safe, โหลดครั้งเดียวตอน startup)
 # =====================================================================
-def _default_model_path() -> str:
-    env_path = os.getenv("MODEL_PATH")
-    if env_path:
-        return env_path
+TUNED_FILENAME = "random_forest_eta.models"
+BASELINE_FILENAME = "baseline.model"
+
+
+def models_dir() -> str:
+    """โฟลเดอร์ที่เก็บไฟล์โมเดล (override ได้ด้วย MODELS_DIR)"""
+    env_dir = os.getenv("MODELS_DIR")
+    if env_dir:
+        return env_dir
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(os.path.dirname(here), "models", "random_forest_eta.models")
+    return os.path.join(os.path.dirname(here), "models")
+
+
+def _default_model_path(filename: str = TUNED_FILENAME) -> str:
+    """ตำแหน่งไฟล์โมเดล
+
+    MODEL_PATH (ของเดิม) ยังใช้ได้กับโมเดล tuned เพื่อไม่ให้ค่าที่ตั้งไว้เดิมพัง
+    ส่วน BASELINE_MODEL_PATH ใช้ชี้โมเดล baseline โดยเฉพาะ
+    """
+    if filename == TUNED_FILENAME:
+        env_path = os.getenv("MODEL_PATH")
+        if env_path:
+            return env_path
+    if filename == BASELINE_FILENAME:
+        env_path = os.getenv("BASELINE_MODEL_PATH")
+        if env_path:
+            return env_path
+    return os.path.join(models_dir(), filename)
 
 
 class EtaPredictor:
     """ครอบ bundle dictionary ที่ notebook เซฟไว้ (model / feature_names / impute_values / metrics)"""
 
-    def __init__(self, model_path: Optional[str] = None) -> None:
+    def __init__(self, model_path: Optional[str] = None, label: str = "tuned") -> None:
         self.model_path = model_path or _default_model_path()
+        self.label = label
         self._bundle: Optional[Dict[str, Any]] = None
         self._lock = threading.Lock()
 
@@ -179,7 +210,7 @@ class EtaPredictor:
                     f"ไม่พบไฟล์โมเดลที่ {self.model_path} "
                     "(คัดลอก random_forest_eta.models มาไว้ใน backend/models/ หรือกำหนด MODEL_PATH)"
                 )
-            logger.info("กำลังโหลดโมเดลจาก %s", self.model_path)
+            logger.info("[%s] กำลังโหลดโมเดลจาก %s", self.label, self.model_path)
             bundle = joblib.load(self.model_path)
 
             required = {"model", "feature_names", "target_col"}
@@ -188,11 +219,14 @@ class EtaPredictor:
                 raise ValueError(f"ไฟล์โมเดลขาดคีย์ที่จำเป็น: {sorted(missing)}")
 
             self._bundle = bundle
+            params = bundle["model"].get_params()
             logger.info(
-                "โหลดโมเดลสำเร็จ: %s | %d ฟีเจอร์ | target=%s",
+                "[%s] โหลดสำเร็จ: %s | %s ต้น, max_depth=%s | %d ฟีเจอร์",
+                self.label,
                 type(bundle["model"]).__name__,
+                params.get("n_estimators"),
+                params.get("max_depth"),
                 len(bundle["feature_names"]),
-                bundle["target_col"],
             )
 
     @property
@@ -325,19 +359,28 @@ class EtaPredictor:
         return X, derived, warnings
 
     # ---------- prediction ----------
+    def predict_from_features(self, X: pd.DataFrame, with_std: bool = True) -> Tuple[float, float]:
+        """ทำนายจาก DataFrame ที่ build_features() เตรียมไว้แล้ว
+
+        แยกออกมาเพื่อให้ DualPredictor build ฟีเจอร์ครั้งเดียวแล้วป้อนให้ทั้งสองโมเดล
+        คืนค่า (prediction, std) โดย std คือการกระจายตัวของคำทำนายจากต้นไม้แต่ละต้น
+        """
+        model = self.model
+        prediction = float(model.predict(X)[0])
+
+        std = 0.0
+        if with_std:
+            estimators = getattr(model, "estimators_", None)
+            if estimators:
+                values = X.values
+                per_tree = np.array([est.predict(values)[0] for est in estimators], dtype=float)
+                std = float(per_tree.std())
+        return prediction, std
+
     def predict_one(self, order: Dict[str, Any], top_k: int = 5) -> Dict[str, Any]:
         """ทำนายออเดอร์เดียว พร้อมรายละเอียดฟีเจอร์และความไม่แน่นอน"""
         X, derived, warnings = self.build_features(order)
-        model = self.model
-
-        prediction = float(model.predict(X)[0])
-
-        # ความไม่แน่นอน: กระจายตัวของคำทำนายจากต้นไม้แต่ละต้นใน Random Forest
-        std = 0.0
-        estimators = getattr(model, "estimators_", None)
-        if estimators:
-            per_tree = np.array([est.predict(X.values)[0] for est in estimators], dtype=float)
-            std = float(per_tree.std())
+        prediction, std = self.predict_from_features(X)
 
         mae = self.metrics.get("MAE", 0.0)
         eta_range = {
@@ -376,5 +419,253 @@ class EtaPredictor:
         return [self.predict_one(order) for order in orders]
 
 
+# =====================================================================
+# การเปรียบเทียบกับเฉลย (Ground Truth)
+# =====================================================================
+def accuracy_percent(actual: float, predicted: float) -> float:
+    """% ความแม่นยำ = max(0, 100 * (1 - |actual - predicted| / actual))
+
+    ถ้า actual เป็น 0 สูตรนี้ใช้ไม่ได้ (หารด้วยศูนย์) — ในทางปฏิบัติไม่เกิด
+    เพราะ Time_taken ต่ำสุดใน dataset คือ 10 นาที แต่กันไว้ก่อน
+    """
+    actual = float(actual)
+    if actual == 0:
+        return 100.0 if float(predicted) == 0 else 0.0
+    return max(0.0, 100.0 * (1.0 - abs(actual - float(predicted)) / abs(actual)))
+
+
+class DualPredictor:
+    """ถือโมเดล 2 ตัวไว้พร้อมกัน แล้วทำนายจากฟีเจอร์ชุดเดียวกัน
+
+    ข้อสมมติสำคัญ: ทั้งสองโมเดลต้องมี feature_names เหมือนกันทุกตัวและเรียงเหมือนกัน
+    ถ้าไม่ตรง load() จะโยน error ทันที ดีกว่าปล่อยให้ทำนายผิดเงียบ ๆ
+    """
+
+    def __init__(self) -> None:
+        self.tuned = EtaPredictor(_default_model_path(TUNED_FILENAME), label="tuned")
+        self.baseline = EtaPredictor(_default_model_path(BASELINE_FILENAME), label="baseline")
+
+    # ---------- lifecycle ----------
+    def load(self) -> None:
+        self.tuned.load()
+        self.baseline.load()
+
+        if self.tuned.feature_names != self.baseline.feature_names:
+            only_tuned = set(self.tuned.feature_names) - set(self.baseline.feature_names)
+            only_base = set(self.baseline.feature_names) - set(self.tuned.feature_names)
+            raise ValueError(
+                "สัญญาฟีเจอร์ของสองโมเดลไม่ตรงกัน จึงเปรียบเทียบกันไม่ได้ "
+                f"(มีเฉพาะใน tuned: {sorted(only_tuned)}, "
+                f"มีเฉพาะใน baseline: {sorted(only_base)}, หรือลำดับคอลัมน์ต่างกัน)"
+            )
+        if self.tuned.target_col != self.baseline.target_col:
+            raise ValueError("target_col ของสองโมเดลไม่ตรงกัน")
+
+        logger.info(
+            "โหลดครบทั้ง 2 โมเดล และสัญญาฟีเจอร์ตรงกัน (%d คอลัมน์)",
+            len(self.tuned.feature_names),
+        )
+
+    @property
+    def is_loaded(self) -> bool:
+        return self.tuned.is_loaded and self.baseline.is_loaded
+
+    @property
+    def target_col(self) -> str:
+        return self.tuned.target_col
+
+    # ---------- comparison ----------
+    def compare_one(
+        self,
+        order: Dict[str, Any],
+        actual_minutes: Optional[float] = None,
+        with_std: bool = True,
+    ) -> Dict[str, Any]:
+        """ทำนายด้วยทั้งสองโมเดลจากออเดอร์เดียวกัน แล้วเทียบกับเฉลย (ถ้ามี)
+
+        Args:
+            order: ข้อมูลดิบ 1 ออเดอร์
+            actual_minutes: เฉลยเวลาจริง ถ้าไม่ส่งมาจะพยายามอ่านจาก order[target_col]
+            with_std: คำนวณ std จากต้นไม้ทุกต้นหรือไม่ (ปิดตอน batch เพื่อความเร็ว)
+        """
+        # เฉลยอาจติดมากับ order เอง (เช่นแถวจาก text.csv)
+        if actual_minutes is None:
+            raw_actual = order.get(self.target_col)
+            if raw_actual is not None and not pd.isna(raw_actual):
+                actual_minutes = float(raw_actual)
+
+        # build ครั้งเดียว ใช้ทั้งสองโมเดล (สัญญาฟีเจอร์ตรงกัน ตรวจแล้วตอน load)
+        X, derived, warnings = self.tuned.build_features(order)
+
+        tuned_pred, tuned_std = self.tuned.predict_from_features(X, with_std=with_std)
+        baseline_pred, baseline_std = self.baseline.predict_from_features(X, with_std=with_std)
+
+        result: Dict[str, Any] = {
+            "order_id": order.get("ID"),
+            "derived_features": derived,
+            "warnings": warnings,
+            "tuned": {
+                "model": "Random Forest (Tuned)",
+                "predicted_minutes": round(tuned_pred, 2),
+                "prediction_std": round(tuned_std, 3),
+                "model_metrics": self.tuned.metrics,
+            },
+            "baseline": {
+                "model": "Random Forest (Baseline)",
+                "predicted_minutes": round(baseline_pred, 2),
+                "prediction_std": round(baseline_std, 3),
+                "model_metrics": self.baseline.metrics,
+            },
+            "actual_minutes": None,
+            "comparison": None,
+        }
+
+        if actual_minutes is None:
+            return result
+
+        actual = float(actual_minutes)
+        tuned_err = abs(actual - tuned_pred)
+        baseline_err = abs(actual - baseline_pred)
+        tuned_acc = accuracy_percent(actual, tuned_pred)
+        baseline_acc = accuracy_percent(actual, baseline_pred)
+
+        # ตัดสินผู้ชนะจากค่าความคลาดเคลื่อน ใช้ epsilon กันปัญหาทศนิยมลอยตัว
+        if abs(tuned_err - baseline_err) < 1e-9:
+            winner = "tie"
+        elif tuned_err < baseline_err:
+            winner = "tuned"
+        else:
+            winner = "baseline"
+
+        result["actual_minutes"] = round(actual, 2)
+        result["tuned"].update(
+            {
+                "error": round(tuned_err, 3),
+                "diff": round(tuned_pred - actual, 2),   # ติดลบ = ทำนายเร็วกว่าจริง
+                "accuracy_percent": round(tuned_acc, 2),
+            }
+        )
+        result["baseline"].update(
+            {
+                "error": round(baseline_err, 3),
+                "diff": round(baseline_pred - actual, 2),
+                "accuracy_percent": round(baseline_acc, 2),
+            }
+        )
+        result["comparison"] = {
+            "winner": winner,
+            "accuracy_gap": round(abs(tuned_acc - baseline_acc), 2),
+            "error_gap": round(abs(tuned_err - baseline_err), 3),
+            "better_model": {
+                "tuned": "Random Forest (Tuned)",
+                "baseline": "Random Forest (Baseline)",
+                "tie": "เสมอกัน",
+            }[winner],
+        }
+        return result
+
+    # ---------- batch ----------
+    def evaluate_batch(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """ประเมินทั้งชุดแล้วสรุป MAE / RMSE / %Accuracy เฉลี่ย / Win rate
+
+        ทำเป็น batch จริง (predict ทีเดียวทั้งก้อน) แทนการวนทีละแถว เพราะ
+        1,000 แถว x 300 ต้นไม้ ถ้าวนทีละแถวจะช้ามาก
+        """
+        if not orders:
+            raise ValueError("ไม่มีข้อมูลให้ประเมิน")
+
+        rows: List[pd.DataFrame] = []
+        actuals: List[float] = []
+        skipped: List[Dict[str, Any]] = []
+
+        for index, order in enumerate(orders):
+            raw_actual = order.get(self.target_col)
+            if raw_actual is None or pd.isna(raw_actual):
+                skipped.append({"index": index, "reason": f"ไม่มีเฉลย '{self.target_col}'"})
+                continue
+            try:
+                X, _, _ = self.tuned.build_features(order)
+            except (ValueError, KeyError) as exc:
+                skipped.append({"index": index, "reason": str(exc)})
+                continue
+            rows.append(X)
+            actuals.append(float(raw_actual))
+
+        if not rows:
+            raise ValueError("ไม่มีแถวไหนผ่านการเตรียมฟีเจอร์เลย")
+
+        X_all = pd.concat(rows, ignore_index=True)
+        y_true = np.asarray(actuals, dtype=float)
+
+        y_tuned = np.asarray(self.tuned.model.predict(X_all), dtype=float)
+        y_baseline = np.asarray(self.baseline.model.predict(X_all), dtype=float)
+
+        err_tuned = np.abs(y_true - y_tuned)
+        err_baseline = np.abs(y_true - y_baseline)
+
+        # % ความแม่นยำคิดรายแถวก่อน แล้วค่อยเฉลี่ย (ไม่ใช่คำนวณย้อนจาก MAE รวม)
+        safe = np.where(y_true == 0, 1.0, y_true)
+        acc_tuned = np.maximum(0.0, 100.0 * (1.0 - err_tuned / np.abs(safe)))
+        acc_baseline = np.maximum(0.0, 100.0 * (1.0 - err_baseline / np.abs(safe)))
+
+        tuned_wins = int(np.sum(err_tuned < err_baseline - 1e-9))
+        baseline_wins = int(np.sum(err_baseline < err_tuned - 1e-9))
+        total = int(len(y_true))
+        ties = total - tuned_wins - baseline_wins
+
+        def stats(y_pred, err, acc, wins):
+            ss_res = float(np.sum((y_true - y_pred) ** 2))
+            ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
+            return {
+                "MAE": round(float(err.mean()), 4),
+                "RMSE": round(float(np.sqrt(np.mean((y_true - y_pred) ** 2))), 4),
+                "R2": round(1.0 - ss_res / ss_tot, 4) if ss_tot else 0.0,
+                "mean_accuracy_percent": round(float(acc.mean()), 2),
+                "median_accuracy_percent": round(float(np.median(acc)), 2),
+                "max_error": round(float(err.max()), 3),
+                "wins": wins,
+            }
+
+        tuned_stats = stats(y_tuned, err_tuned, acc_tuned, tuned_wins)
+        baseline_stats = stats(y_baseline, err_baseline, acc_baseline, baseline_wins)
+
+        overall_winner = (
+            "tuned"
+            if tuned_stats["MAE"] < baseline_stats["MAE"]
+            else "baseline"
+            if baseline_stats["MAE"] < tuned_stats["MAE"]
+            else "tie"
+        )
+
+        return {
+            "evaluated": total,
+            "skipped": skipped,
+            "tuned": tuned_stats,
+            "baseline": baseline_stats,
+            "win_rate": {
+                "tuned_wins": tuned_wins,
+                "baseline_wins": baseline_wins,
+                "ties": ties,
+                "tuned_win_percent": round(100.0 * tuned_wins / total, 2),
+                "baseline_win_percent": round(100.0 * baseline_wins / total, 2),
+                "tie_percent": round(100.0 * ties / total, 2),
+            },
+            "overall_winner": overall_winner,
+            "mae_improvement_percent": (
+                round(
+                    100.0 * (baseline_stats["MAE"] - tuned_stats["MAE"]) / baseline_stats["MAE"], 2
+                )
+                if baseline_stats["MAE"]
+                else 0.0
+            ),
+            "accuracy_gap": round(
+                tuned_stats["mean_accuracy_percent"] - baseline_stats["mean_accuracy_percent"], 2
+            ),
+        }
+
+
 # instance เดียวที่ใช้ร่วมกันทั้งแอป
-predictor = EtaPredictor()
+dual = DualPredictor()
+
+# ชื่อเดิม ชี้ไปที่โมเดล tuned เพื่อให้ /predict ของเดิมยังทำงานเหมือนเดิม
+predictor = dual.tuned

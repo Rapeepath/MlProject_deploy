@@ -2,8 +2,11 @@
    Rider Live Map — logic ฝั่งเบราว์เซอร์
 
    การทำงาน:
-     กด "สร้างไรเดอร์" -> Django สุ่มออเดอร์ + ส่งให้โมเดลทำนาย -> ได้ ETA กลับมา
-     -> วาดแผนที่เมืองนั้น + เส้นทาง -> ไรเดอร์วิ่งจากร้านไปจุดส่งตามเวลาที่ทำนายได้
+     กด "ดึงออเดอร์จาก text.csv" -> Django ขอ 1 แถวจากชุดทดสอบจริง (มีเฉลย)
+     -> Backend ทำนายด้วย 2 โมเดล แล้วเทียบกับเฉลย -> หน้าเว็บแสดงผลเปรียบเทียบ
+     -> ไรเดอร์วิ่งบนแผนที่ตาม "เวลาจริง" (เฉลย) ไม่ใช่ตามคำทำนาย
+
+   กด "ทดสอบทั้ง 1,000 แถว" -> Backend ประเมินทั้งชุด แล้วสรุป MAE / %Accuracy / Win rate
 
    ทุก request ยิงไปที่ Django (/api/...) ไม่ได้ยิงตรงไปหา FastAPI
    (Django ทำหน้าที่ proxy จึงไม่ต้องยุ่งกับ CORS และ URL ของ Backend ไม่หลุดมาฝั่ง client)
@@ -43,6 +46,9 @@
   const CITIES = readJSON("city-data", []);
   const CITY_BY_CODE = {};
   CITIES.forEach((c) => (CITY_BY_CODE[c.code] = c));
+
+  const TESTSET = readJSON("testset-info", {});
+  const TESTSET_TOTAL = Number(TESTSET.count) || 1000;
 
   function csrfTokenFromCookie() {
     const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]*)/);
@@ -358,7 +364,8 @@
   // 5) วงจรชีวิตของไรเดอร์
   // ===================================================================
   const MAX_RIDERS = 8;
-  const MS_PER_MINUTE = 900; // 1 นาทีที่โมเดลทำนาย = 0.9 วินาทีบนหน้าจอ (ที่ความเร็ว 1×)
+  const MS_PER_MINUTE = 900; // 1 นาทีจริง = 0.9 วินาทีบนหน้าจอ (ที่ความเร็ว 1×)
+  const MAX_HISTORY = 12;    // เก็บประวัติผลเปรียบเทียบไว้กี่รายการ
 
   const VEHICLE_ICON = { motorcycle: "🏍️", scooter: "🛵", electric_scooter: "⚡", bicycle: "🚲" };
   const PERIOD_TH = {
@@ -369,6 +376,7 @@
 
   /** riders: { id, order, cityName, cityCode, prediction, progress, done, els } */
   const riders = [];
+  const history = [];   // ผลเปรียบเทียบย้อนหลัง (ไว้นับสกอร์รวม)
   let selectedId = null;
   let nextId = 1;
   let speed = 1;
@@ -386,17 +394,15 @@
   btnGenerate.addEventListener("click", async () => {
     btnGenerate.disabled = true;
     const original = btnGenerate.innerHTML;
-    btnGenerate.innerHTML = "<span>⏳</span> กำลังสุ่ม…";
+    btnGenerate.innerHTML = "<span>⏳</span> กำลังดึง…";
     show($("#map-error"), false);
 
     try {
-      // /api/simulate/ ทำทั้งสุ่มและทำนายให้ในครั้งเดียว จึงยิงแค่รอบเดียว
-      const city = $("#city-select").value;
-      const data = await apiFetch("/api/simulate/", {
-        method: "POST",
-        body: JSON.stringify({ count: 1, city: city || null }),
-      });
-      addRider(data.results[0]);
+      // /api/test-sample/ ดึงแถวจาก text.csv + ให้ 2 โมเดลทำนาย + เทียบเฉลย ในครั้งเดียว
+      const raw = $("#sample-index").value.trim();
+      const query = raw === "" ? "" : "?index=" + encodeURIComponent(raw);
+      const data = await apiFetch("/api/test-sample/" + query);
+      addRider(data);
       setBackendStatus(true, "โมเดลพร้อม");
     } catch (err) {
       const box = $("#map-error");
@@ -409,6 +415,14 @@
     }
   });
 
+  /**
+   * รับผลจาก /compare/test-sample แล้วเพิ่มออเดอร์ลงแผนที่
+   *
+   * รูปแบบที่ได้: { test_index, order, actual_minutes, tuned, baseline, comparison,
+   *                derived_features, warnings }
+   * ไรเดอร์วิ่งตาม actual_minutes (เวลาจริง) เพราะนั่นคือสิ่งที่เกิดขึ้นจริง
+   * ส่วนคำทำนายของสองโมเดลเอาไว้เทียบว่าใครใกล้เคียงกว่ากัน
+   */
   function addRider(result) {
     // เกินจำนวนสูงสุด -> เอาคนที่ส่งเสร็จแล้วออกก่อน ถ้าไม่มีค่อยเอาคนเก่าสุด
     if (riders.length >= MAX_RIDERS) {
@@ -416,23 +430,29 @@
       removeRider(riders[idx >= 0 ? idx : 0].id);
     }
 
+    const order = result.order;
+    const cityCode = (order.Delivery_person_ID || "XXXX").slice(0, 4);
+    const city = CITY_BY_CODE[cityCode];
+
     const rider = {
       id: nextId++,
-      order: result.order,
-      cityName: result.city_name,
-      cityCode: result.city_code,
-      prediction: result.prediction,
-      minutes: result.prediction.predicted_minutes,
+      testIndex: result.test_index,
+      order: order,
+      cityCode: cityCode,
+      cityName: city ? city.name : cityCode,
+      result: result,
+      actual: Number(result.actual_minutes),
+      // แผนที่เดินตามเวลาจริง ไม่ใช่คำทำนาย
+      minutes: Number(result.actual_minutes),
       progress: 0,
       done: false,
-      startedAt: performance.now(),
       els: {},
     };
     riders.push(rider);
 
     buildRiderSvg(rider);
-    buildRiderCard(rider);
     selectRider(rider.id);
+    pushHistory(rider);
 
     show($("#map-empty"), false);
     refreshSidebar();
@@ -551,7 +571,6 @@
           onDelivered(rider);
         }
         drawProgress(rider);
-        updateRiderCard(rider);
         if (rider.id === selectedId) updateEtaCard(rider);
       });
 
@@ -568,8 +587,6 @@
   function onDelivered(rider) {
     rider.els.routeGroup.classList.add("is-done");
     rider.els.markerGroup.classList.add("is-done");
-    const card = rider.els.card;
-    if (card) card.classList.add("is-done");
     refreshSidebar();
   }
 
@@ -579,7 +596,6 @@
     const rider = riders[idx];
     rider.els.routeGroup.remove();
     rider.els.markerGroup.remove();
-    if (rider.els.card) rider.els.card.remove();
     riders.splice(idx, 1);
 
     if (selectedId === id) {
@@ -614,12 +630,12 @@
       r.els.routeGroup.classList.toggle("is-dim", !isSel);
       r.els.markerGroup.classList.toggle("is-dim", !isSel);
       r.els.markerGroup.classList.toggle("marker--selected", isSel);
-      if (r.els.card) r.els.card.classList.toggle("is-selected", isSel);
     });
 
     $("#map-city-name").textContent = rider.cityName;
     show($("#map-city"), true);
     updateEtaCard(rider);
+    renderComparison(rider);
   }
 
   function clearSelection() {
@@ -641,6 +657,9 @@
   // --- ปุ่มล้างทั้งหมด ---
   $("#btn-clear").addEventListener("click", () => {
     riders.slice().forEach((r) => removeRider(r.id));
+    history.length = 0;
+    $("#history-list").innerHTML = "";
+    renderHistoryScore();
   });
 
   // ===================================================================
@@ -658,85 +677,148 @@
 
     $("#eta-remaining").textContent = rider.done ? "0.0" : fmt(remaining, 1);
     $("#eta-status").textContent = rider.done ? "ส่งถึงแล้ว 🎉" : "กำลังเดินทาง";
-    $("#eta-total").textContent = fmt(rider.minutes, 1) + " นาที";
-    $("#eta-distance").textContent = fmt(rider.prediction.derived_features.Distance_km, 2) + " กม.";
+    $("#eta-actual").textContent = fmt(rider.actual, 1) + " นาที";
+    $("#eta-distance").textContent =
+      fmt(rider.result.derived_features.Distance_km, 2) + " กม.";
 
     $("#eta-progress").style.width = (rider.progress * 100).toFixed(1) + "%";
     card.classList.toggle("is-done", rider.done);
   }
 
-  function buildRiderCard(rider) {
-    const o = rider.order;
-    const card = document.createElement("article");
-    card.className = "rcard";
-    card.dataset.rider = rider.id;
+  // ===================================================================
+  // ประวัติผลเปรียบเทียบ
+  // ===================================================================
+  function pushHistory(rider) {
+    const cmp = rider.result.comparison;
+    const row = document.createElement("div");
+    row.className = "hrow";
+    row.dataset.rider = rider.id;
 
-    const trafficClass =
-      { Jam: "tag--jam", High: "tag--high", Low: "tag--low" }[o.Road_traffic_density] || "";
+    const icon = !cmp ? "—" : cmp.winner === "tuned" ? "🟢" : cmp.winner === "baseline" ? "🔵" : "🤝";
 
-    const tags = [
-      '<span class="tag ' + trafficClass + '">🚦 ' + escapeHtml(o.Road_traffic_density) + "</span>",
-      '<span class="tag">🌤 ' + escapeHtml(o.Weather_conditions) + "</span>",
-    ];
-    if (o.Festival === "Yes") tags.push('<span class="tag tag--festival">🎉 เทศกาล</span>');
-    if (o.multiple_deliveries > 0) tags.push('<span class="tag">📦 พ่วง ' + o.multiple_deliveries + "</span>");
+    row.innerHTML =
+      '<span class="hrow__idx">#' + rider.testIndex + "</span>" +
+      '<span class="hrow__bar">' +
+        '<span class="hrow__chip hrow__chip--truth">' + fmt(rider.actual, 0) + "</span>" +
+        '<span class="hrow__chip hrow__chip--tuned">' + fmt(rider.result.tuned.predicted_minutes, 1) + "</span>" +
+        '<span class="hrow__chip hrow__chip--baseline">' + fmt(rider.result.baseline.predicted_minutes, 1) + "</span>" +
+      "</span>" +
+      '<span class="hrow__win">' + icon + "</span>";
 
-    card.innerHTML =
-      '<div class="rcard__head">' +
-        '<span class="rcard__avatar">' + (VEHICLE_ICON[o.Type_of_vehicle] || "🛵") + "</span>" +
-        '<span class="rcard__who">' +
-          '<span class="rcard__city">' + escapeHtml(rider.cityName) + "</span>" +
-          '<span class="rcard__id">' + escapeHtml(o.Delivery_person_ID || "") + "</span>" +
-        "</span>" +
-        '<span class="rcard__eta">' +
-          '<span class="rcard__num" style="color:' + etaColor(rider.minutes) + '">' +
-            fmt(rider.minutes, 1) + "</span>" +
-          '<span class="rcard__unit">นาที</span>' +
-        "</span>" +
-      "</div>" +
-      '<div class="rcard__tags">' + tags.join("") + "</div>" +
-      '<div class="rcard__bar"><div class="rcard__fill"></div></div>' +
-      '<div class="rcard__foot">' +
-        '<span class="rcard__status">กำลังเดินทาง</span>' +
-        '<button type="button" class="rcard__detail">ดูรายละเอียด</button>' +
-      "</div>";
+    row.title = "เฉลย " + fmt(rider.actual, 0) + " · Tuned " +
+      fmt(rider.result.tuned.predicted_minutes, 1) + " · Baseline " +
+      fmt(rider.result.baseline.predicted_minutes, 1);
 
-    // คลิกการ์ด = โฟกัสไรเดอร์คนนี้
-    card.addEventListener("click", () => selectRider(rider.id));
-    // ปุ่มรายละเอียด = เปิด modal (อย่าให้ทะลุไปทริกเกอร์ click ของการ์ด)
-    card.querySelector(".rcard__detail").addEventListener("click", (event) => {
-      event.stopPropagation();
-      openDetail(rider.id);
+    row.addEventListener("click", () => {
+      if (riders.some((r) => r.id === rider.id)) selectRider(rider.id);
     });
 
-    $("#rider-list").prepend(card);
-    rider.els.card = card;
-    rider.els.cardFill = card.querySelector(".rcard__fill");
-    rider.els.cardStatus = card.querySelector(".rcard__status");
+    const list = $("#history-list");
+    list.prepend(row);
+    while (list.children.length > MAX_HISTORY) list.lastElementChild.remove();
+
+    history.unshift({ winner: cmp ? cmp.winner : "tie" });
+    while (history.length > MAX_HISTORY) history.pop();
+    renderHistoryScore();
   }
 
-  function updateRiderCard(rider) {
-    if (!rider.els.cardFill) return;
-    rider.els.cardFill.style.width = (rider.progress * 100).toFixed(1) + "%";
-    rider.els.cardStatus.textContent = rider.done
-      ? "ส่งถึงแล้ว"
-      : "เหลือ " + fmt(rider.minutes * (1 - rider.progress), 1) + " นาที";
+  function renderHistoryScore() {
+    const tuned = history.filter((h) => h.winner === "tuned").length;
+    const base = history.filter((h) => h.winner === "baseline").length;
+    $("#history-count").textContent = history.length;
+    $("#history-score").textContent = "🟢 " + tuned + " – " + base + " 🔵";
+    show($("#history"), history.length > 0);
   }
 
   function refreshSidebar() {
-    const active = riders.filter((r) => !r.done).length;
-    const done = riders.length - active;
+    const has = riders.length > 0;
+    show($("#sidebar-empty"), !has);
+    $("#btn-clear").disabled = !has;
+    if (!has) {
+      show($("#truth-card"), false);
+      show($("#versus"), false);
+      show($("#winner-badge"), false);
+      show($("#btn-detail"), false);
+      show($("#compare-warnings"), false);
+      $("#sample-badge").textContent = "—";
+    }
+  }
 
-    $("#rider-count").textContent = riders.length;
-    $("#stat-active").textContent = active;
-    $("#stat-done").textContent = done;
-    $("#stat-avg").textContent = riders.length
-      ? fmt(riders.reduce((sum, r) => sum + r.minutes, 0) / riders.length, 1)
-      : "—";
+  /** แสดงผลเปรียบเทียบของออเดอร์ที่เลือกอยู่ */
+  function renderComparison(rider) {
+    const r = rider.result;
+    const cmp = r.comparison;
 
-    show($("#fleet-stats"), riders.length > 0);
-    show($("#sidebar-empty"), riders.length === 0);
-    $("#btn-clear").disabled = riders.length === 0;
+    $("#sample-badge").textContent = "#" + rider.testIndex + " / " + TESTSET_TOTAL;
+    $("#truth-minutes").textContent = fmt(rider.actual, 1);
+    $("#truth-src").textContent = "text.csv แถวที่ " + rider.testIndex + " · " + (r.order_id || "");
+    show($("#truth-card"), true);
+
+    renderSide("tuned", r.tuned, rider.actual, cmp);
+    renderSide("baseline", r.baseline, rider.actual, cmp);
+    show($("#versus"), true);
+
+    // แถบสรุปผู้ชนะ
+    const badge = $("#winner-badge");
+    badge.classList.remove("is-tuned", "is-baseline", "is-tie");
+    if (cmp) {
+      badge.classList.add("is-" + cmp.winner);
+      if (cmp.winner === "tie") {
+        $("#winner-text").innerHTML = "ทั้งสองโมเดลทำนายห่างจากเฉลย <b>เท่ากัน</b>";
+      } else {
+        const label = cmp.winner === "tuned" ? "Tuned Model" : "Baseline Model";
+        const other = cmp.winner === "tuned" ? "Baseline" : "Tuned";
+        $("#winner-text").innerHTML =
+          "<b>" + label + "</b> แม่นยำกว่า " + other + " อยู่ <b>" +
+          fmt(cmp.accuracy_gap, 2) + "%</b> (ห่างจากเฉลยน้อยกว่า " +
+          fmt(cmp.error_gap, 2) + " นาที)";
+      }
+      show(badge, true);
+    } else {
+      show(badge, false);
+    }
+
+    // คำเตือนจากโมเดล
+    const warnBox = $("#compare-warnings");
+    if (r.warnings && r.warnings.length) {
+      warnBox.innerHTML = "<strong>ข้อควรระวัง</strong><ul>" +
+        r.warnings.map((w) => "<li>" + escapeHtml(w) + "</li>").join("") + "</ul>";
+      show(warnBox, true);
+    } else {
+      show(warnBox, false);
+    }
+
+    show($("#btn-detail"), true);
+  }
+
+  /** เติมค่าให้การ์ดโมเดลฝั่งหนึ่ง */
+  function renderSide(key, side, actual, cmp) {
+    const pred = side.predicted_minutes;
+    $("#" + key + "-pred").textContent = fmt(pred, 1);
+
+    // ส่วนต่างจากเฉลย: บวก = ทำนายช้ากว่าจริง, ลบ = เร็วกว่าจริง
+    const diffEl = $("#" + key + "-diff");
+    const diff = side.diff !== undefined && side.diff !== null ? side.diff : pred - actual;
+    diffEl.classList.remove("is-over", "is-under", "is-exact");
+    if (Math.abs(diff) < 0.05) {
+      diffEl.textContent = "ตรงเฉลยพอดี";
+      diffEl.classList.add("is-exact");
+    } else {
+      diffEl.textContent = (diff > 0 ? "+" : "") + fmt(diff, 1) + " นาที";
+      diffEl.classList.add(diff > 0 ? "is-over" : "is-under");
+    }
+
+    const acc = side.accuracy_percent;
+    $("#" + key + "-acc").textContent = acc === null || acc === undefined ? "—" : fmt(acc, 1) + "%";
+    $("#" + key + "-bar").style.width = "0%";
+    requestAnimationFrame(() => {
+      $("#" + key + "-bar").style.width = Math.max(0, Math.min(100, acc || 0)) + "%";
+    });
+
+    const card = $("#card-" + key);
+    const won = cmp && cmp.winner === key;
+    card.classList.toggle("is-winner", Boolean(won));
+    show($("#crown-" + key), Boolean(won));
   }
 
   // ===================================================================
@@ -788,16 +870,22 @@
     if (!rider) return;
 
     const o = rider.order;
-    const p = rider.prediction;
+    const p = rider.result;
     const d = p.derived_features;
+    const cmp = p.comparison;
 
-    $("#modal-title").textContent = "ออเดอร์ " + (o.ID || "—");
-    $("#modal-sub").textContent = rider.cityName + " · " + (o.Delivery_person_ID || "");
+    $("#modal-title").textContent = "Test Sample #" + rider.testIndex + " · " + (o.ID || "—");
+    $("#modal-sub").textContent =
+      "text.csv แถวที่ " + rider.testIndex + " / " + TESTSET_TOTAL +
+      " · " + (o.Delivery_person_ID || "");
 
-    // สรุปผลทำนาย
-    $("#d-eta").textContent = fmt(p.predicted_minutes, 1);
-    $("#d-range").textContent = fmt(p.eta_range.low, 1) + " – " + fmt(p.eta_range.high, 1) + " นาที";
-    $("#d-std").textContent = "± " + fmt(p.prediction_std, 2) + " นาที";
+    // สรุปเปรียบเทียบ
+    $("#d-eta").textContent = fmt(rider.actual, 1);
+    $("#d-tuned").textContent =
+      fmt(p.tuned.predicted_minutes, 1) + " นาที (ห่าง " + fmt(p.tuned.error, 2) + ")";
+    $("#d-baseline").textContent =
+      fmt(p.baseline.predicted_minutes, 1) + " นาที (ห่าง " + fmt(p.baseline.error, 2) + ")";
+    $("#d-winner").textContent = cmp ? cmp.better_model : "—";
 
     // คำเตือนจากโมเดล (ถ้ามี)
     const warnBox = $("#d-warnings");
@@ -825,7 +913,7 @@
       row("Is_weekend — เป็นวันหยุด", d.Is_weekend ? "ใช่" : "ไม่ใช่"),
     ].join("");
 
-    // ปัจจัยสำคัญ
+    // ปัจจัยสำคัญ (โครงสร้างใหม่ไม่ได้ส่ง top_factors มา จึงซ่อนบล็อกนี้ถ้าไม่มี)
     const factors = p.top_factors || [];
     const maxImp = factors.length ? Math.max(...factors.map((f) => f.importance)) : 1;
     $("#d-factors").innerHTML = factors
@@ -842,6 +930,10 @@
       )
       .join("");
 
+    // /compare ไม่ได้ส่ง top_factors มา (เป็นค่าของโมเดลโดยรวม ไม่ใช่ของออเดอร์นี้)
+    const factorBlock = $("#d-factors").closest(".mblock");
+    if (factorBlock) show(factorBlock, factors.length > 0);
+
     show(modal, true);
     document.body.style.overflow = "hidden";
     requestAnimationFrame(() => {
@@ -854,12 +946,156 @@
     document.body.style.overflow = "";
   }
 
+  $("#btn-detail").addEventListener("click", () => {
+    if (selectedId !== null) openDetail(selectedId);
+  });
+
   modal.addEventListener("click", (event) => {
     if (event.target.hasAttribute("data-close")) closeDetail();
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !modal.hidden) closeDetail();
+    if (event.key !== "Escape") return;
+    if (!benchModal.hidden) closeBench();
+    else if (!modal.hidden) closeDetail();
+  });
+
+  // ===================================================================
+  // 7.5) Benchmark ทั้งชุด 1,000 แถว
+  // ===================================================================
+  const benchModal = $("#bench-modal");
+  const btnBenchmark = $("#btn-benchmark");
+  let benchCache = null;   // ผลล่าสุด เปิดซ้ำไม่ต้องรันใหม่
+
+  $("#bench-total").textContent = TESTSET_TOTAL.toLocaleString("th-TH");
+
+  btnBenchmark.addEventListener("click", async () => {
+    show(benchModal, true);
+    document.body.style.overflow = "hidden";
+    show($("#bench-error"), false);
+
+    // มีผลเดิมอยู่แล้ว -> แสดงเลย ไม่ต้องรันซ้ำ
+    if (benchCache) {
+      renderBenchmark(benchCache);
+      return;
+    }
+
+    show($("#bench-body"), false);
+    show($("#bench-loading"), true);
+    $("#bench-sub").textContent = "กำลังประเมิน " + TESTSET_TOTAL.toLocaleString("th-TH") + " แถว…";
+    btnBenchmark.disabled = true;
+
+    try {
+      const data = await apiFetch("/api/evaluate-batch/", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      benchCache = data;
+      renderBenchmark(data);
+      setBackendStatus(true, "โมเดลพร้อม");
+    } catch (err) {
+      show($("#bench-loading"), false);
+      const box = $("#bench-error");
+      box.textContent = err.message;
+      show(box, true);
+      $("#bench-sub").textContent = "ประเมินไม่สำเร็จ";
+      setBackendStatus(false, "โมเดลมีปัญหา");
+    } finally {
+      btnBenchmark.disabled = false;
+    }
+  });
+
+  function renderBenchmark(d) {
+    show($("#bench-loading"), false);
+
+    $("#bench-sub").textContent =
+      d.source + " · ใช้เวลา " + fmt(d.elapsed_seconds, 2) + " วินาที";
+    $("#bench-meta").textContent =
+      "ประเมิน " + d.evaluated.toLocaleString("th-TH") + " แถว" +
+      (d.skipped && d.skipped.length ? " · ข้าม " + d.skipped.length + " แถว" : "");
+
+    // ---- แถบผู้ชนะรวม ----
+    const badge = $("#bench-winner");
+    badge.classList.remove("is-tuned", "is-baseline", "is-tie");
+    badge.classList.add("is-" + d.overall_winner);
+    if (d.overall_winner === "tie") {
+      $("#bench-winner-text").innerHTML = "ทั้งสองโมเดลได้ MAE <b>เท่ากัน</b>";
+    } else {
+      const label = d.overall_winner === "tuned" ? "Tuned Model" : "Baseline Model";
+      const other = d.overall_winner === "tuned" ? "Baseline" : "Tuned";
+      const impr = Math.abs(d.mae_improvement_percent);
+      $("#bench-winner-text").innerHTML =
+        "<b>" + label + "</b> แม่นยำกว่า " + other + " โดยรวม — " +
+        "ค่าความคลาดเคลื่อนเฉลี่ยต่ำกว่า <b>" + fmt(impr, 2) + "%</b>";
+    }
+
+    // ---- ตารางเปรียบเทียบ ----
+    // lowerIsBetter: true = ค่าน้อยกว่าดีกว่า
+    const ROWS = [
+      { key: "MAE", label: "MAE — ค่าความคลาดเคลื่อนเฉลี่ย", unit: " นาที", digits: 4, lower: true },
+      { key: "RMSE", label: "RMSE — ให้น้ำหนักกับความผิดพลาดใหญ่", unit: "", digits: 4, lower: true },
+      { key: "R2", label: "R² — อธิบายความผันแปรได้เท่าไร", unit: "", digits: 4, lower: false },
+      { key: "mean_accuracy_percent", label: "ความแม่นยำเฉลี่ย", unit: "%", digits: 2, lower: false },
+      { key: "median_accuracy_percent", label: "ความแม่นยำมัธยฐาน", unit: "%", digits: 2, lower: false },
+      { key: "max_error", label: "พลาดมากที่สุด", unit: " นาที", digits: 3, lower: true },
+    ];
+
+    $("#bench-rows").innerHTML = ROWS.map((row) => {
+      const t = d.tuned[row.key];
+      const b = d.baseline[row.key];
+      const tBetter = row.lower ? t < b : t > b;
+      const bBetter = row.lower ? b < t : b > t;
+      const verdict = tBetter ? "🟢 Tuned" : bBetter ? "🔵 Baseline" : "เสมอ";
+      return (
+        "<tr>" +
+        "<td>" + escapeHtml(row.label) + "</td>" +
+        '<td class="' + (tBetter ? "is-best" : "") + '">' + fmt(t, row.digits) + row.unit + "</td>" +
+        '<td class="' + (bBetter ? "is-best" : "") + '">' + fmt(b, row.digits) + row.unit + "</td>" +
+        '<td class="is-verdict">' + verdict + "</td>" +
+        "</tr>"
+      );
+    }).join("");
+
+    // ---- Win rate ----
+    const w = d.win_rate;
+    $("#win-tuned").textContent = w.tuned_wins + " (" + fmt(w.tuned_win_percent, 1) + "%)";
+    $("#win-baseline").textContent = w.baseline_wins + " (" + fmt(w.baseline_win_percent, 1) + "%)";
+    $("#win-tie").textContent = w.ties + " (" + fmt(w.tie_percent, 1) + "%)";
+
+    const segs = [
+      ["#winbar-tuned", w.tuned_win_percent, w.tuned_wins],
+      ["#winbar-tie", w.tie_percent, w.ties],
+      ["#winbar-baseline", w.baseline_win_percent, w.baseline_wins],
+    ];
+    segs.forEach(([sel, pct]) => ($(sel).style.width = "0%"));
+    requestAnimationFrame(() => {
+      segs.forEach(([sel, pct, count]) => {
+        const el = $(sel);
+        el.style.width = pct + "%";
+        el.textContent = pct >= 12 ? fmt(pct, 1) + "%" : "";
+        el.title = count + " แถว (" + fmt(pct, 1) + "%)";
+      });
+    });
+
+    // ---- หมายเหตุตีความ ----
+    const gap = Math.abs(d.accuracy_gap);
+    $("#bench-note").textContent =
+      gap < 1
+        ? "หมายเหตุ: ผลต่างความแม่นยำเฉลี่ยอยู่ที่ " + fmt(gap, 2) +
+          "% เท่านั้น ถือว่าสองโมเดลทำได้ใกล้เคียงกันมาก " +
+          "การปรับจูน hyperparameter ในงานนี้ช่วยได้เพียงเล็กน้อย"
+        : "ผลต่างความแม่นยำเฉลี่ย " + fmt(gap, 2) + "%";
+
+    show($("#bench-body"), true);
+  }
+
+  function closeBench() {
+    show(benchModal, false);
+    document.body.style.overflow = "";
+  }
+
+  benchModal.addEventListener("click", (event) => {
+    if (event.target.hasAttribute("data-close-bench")) closeBench();
   });
 
   // ===================================================================
@@ -901,4 +1137,5 @@
   // ===================================================================
   syncMapSize();
   refreshSidebar();
+  renderHistoryScore();
 })();

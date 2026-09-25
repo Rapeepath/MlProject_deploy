@@ -1,2 +1,8 @@
-# โมเดลมีขนาด ~129 MB เกินลิมิตไฟล์ปกติของ GitHub (100 MB) ต้องใช้ Git LFS
+# ไฟล์โมเดลใหญ่เกินลิมิต 100 MB ของ GitHub ต้องผ่าน Git LFS ทั้งคู่
+#   random_forest_eta.models  ~129 MB (Tuned)
+#   baseline.model            ~206 MB (Baseline)
 models/*.models filter=lfs diff=lfs merge=lfs -text
+models/*.model  filter=lfs diff=lfs merge=lfs -text
+
+# ชุดทดสอบเล็ก (~180 KB) เก็บเป็น text ปกติ แต่บังคับ LF กัน CRLF ปนตอน clone ข้ามระบบ
+data/*.csv text eol=lf

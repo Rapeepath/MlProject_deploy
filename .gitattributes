@@ -1,3 +1,12 @@
 # Large files handled by Git LFS
+# หมายเหตุ: มีสองนามสกุลที่ต่างกันแค่ตัว s
+#   random_forest_eta.models (Tuned, ~129 MB)  -> *.models
+#   baseline.model           (Baseline, ~206 MB) -> *.model
+# ถ้าตั้งแค่แบบเดียว อีกไฟล์จะหลุดไปเป็น blob ปกติแล้ว push ไม่ผ่านลิมิต 100 MB ของ GitHub
 *.models filter=lfs diff=lfs merge=lfs -text
+*.model  filter=lfs diff=lfs merge=lfs -text
 backend/models/*.models filter=lfs diff=lfs merge=lfs -text
+backend/models/*.model  filter=lfs diff=lfs merge=lfs -text
+
+# ชุดทดสอบเล็ก (~180 KB) เก็บเป็น text ปกติ แต่บังคับ LF กัน CRLF ปนตอน clone ข้ามระบบ
+backend/data/*.csv text eol=lf

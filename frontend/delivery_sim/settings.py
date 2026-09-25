@@ -129,6 +129,10 @@ BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8000").rstrip("
 # และใช้เวลา cold start ราว 30-60 วินาทีในการปลุก + โหลดโมเดล 129 MB
 BACKEND_TIMEOUT = float(os.getenv("BACKEND_TIMEOUT", "60"))
 
+# benchmark 1,000 แถว x 2 โมเดล ใช้เวลาราว 4 วินาทีบนเครื่องปกติ
+# แต่บน instance เล็ก ๆ อาจนานกว่านั้นมาก จึงเผื่อไว้ยาว
+BATCH_TIMEOUT = float(os.getenv("BATCH_TIMEOUT", "180"))
+
 # ถ้าตั้งเป็น True เมื่อ Backend ล่ม หน้าบ้านจะยังสุ่มออเดอร์โชว์ได้ แต่ไม่มีผลทำนาย
 ALLOW_BACKEND_DOWN = _env_bool("ALLOW_BACKEND_DOWN", True)
 
